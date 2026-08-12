@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GIS Helper — Draw Geometry</title>
+
+  <!-- Leaflet + Leaflet.draw from CDN -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+  <style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 96px; left: 0; right: 0; }
+    #bar {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 96px;
+      box-sizing: border-box; padding: 10px 14px; background: #f7f7f8;
+      border-top: 1px solid #ddd; display: flex; align-items: center; gap: 12px;
+    }
+    #bar .info { flex: 1; font-size: 13px; color: #333; line-height: 1.4; }
+    #bar .info .muted { color: #777; }
+    button {
+      font-size: 14px; padding: 9px 16px; border-radius: 6px; border: 1px solid #ccc;
+      background: #fff; cursor: pointer;
+    }
+    button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #status.ok { color: #1a7f37; font-weight: 600; }
+    #status.err { color: #c0392b; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="bar">
+    <div class="info">
+      <div><strong>Draw one shape</strong> (polygon, rectangle, line, or marker) using the tools at the top-left, then click <strong>Save</strong>.</div>
+      <div id="status" class="muted">No geometry saved yet.</div>
+    </div>
+    <button id="clearBtn">Clear</button>
+    <button id="saveBtn" class="primary" disabled>Save</button>
+  </div>
+
+  <script>
+    const CONFIG = __PREFAB_GIS_CONFIG__;
+
+    const map = L.map("map").setView([CONFIG.centerLat, CONFIG.centerLon], CONFIG.zoom);
+    L.tileLayer(CONFIG.tileUrl, { attribution: CONFIG.tileAttribution, maxZoom: 19 }).addTo(map);
+
+    // A single feature group holds whatever the user has drawn.
+    const drawn = new L.FeatureGroup();
+    map.addLayer(drawn);
+
+    const drawControl = new L.Control.Draw({
+      edit: { featureGroup: drawn },
+      draw: {
+        polygon: { allowIntersection: false, showArea: true },
+        rectangle: true,
+        polyline: true,
+        marker: true,
+        circle: false,        // circles have no clean GeoJSON representation
+        circlemarker: false,
+      },
+    });
+    map.addControl(drawControl);
+
+    const statusEl = document.getElementById("status");
+    const saveBtn = document.getElementById("saveBtn");
+    const clearBtn = document.getElementById("clearBtn");
+
+    function setStatus(text, kind) {
+      statusEl.textContent = text;
+      statusEl.className = kind || "muted";
+    }
+
+    function refreshSaveState() {
+      saveBtn.disabled = drawn.getLayers().length === 0;
+    }
+
+    // Keep only the most recently drawn shape to keep the contract to a single
+    // geometry (the downstream servers take one geometry at a time).
+    map.on(L.Draw.Event.CREATED, (e) => {
+      drawn.clearLayers();
+      drawn.addLayer(e.layer);
+      setStatus("Shape drawn. Click Save to send it back to the chat.", "muted");
+      refreshSaveState();
+    });
+
+    map.on(L.Draw.Event.EDITED, refreshSaveState);
+    map.on(L.Draw.Event.DELETED, refreshSaveState);
+
+    clearBtn.addEventListener("click", () => {
+      drawn.clearLayers();
+      setStatus("Cleared. Draw a shape to continue.", "muted");
+      refreshSaveState();
+    });
+
+    // Convert the single drawn layer to a bare GeoJSON geometry. Markers become
+    // Point, polylines LineString, polygons/rectangles Polygon.
+    function currentGeometry() {
+      const layers = drawn.getLayers();
+      if (layers.length === 0) return null;
+      const gj = layers[0].toGeoJSON();
+      // toGeoJSON() returns a Feature; hand back the bare geometry.
+      return gj.geometry || gj;
+    }
+
+    saveBtn.addEventListener("click", async () => {
+      const geometry = currentGeometry();
+      if (!geometry) {
+        setStatus("Nothing to save — draw a shape first.", "err");
+        return;
+      }
+      saveBtn.disabled = true;
+      setStatus("Saving...", "muted");
+      try {
+        const resp = await fetch(CONFIG.postUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ geometry }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+          const s = data.summary || {};
+          const bits = [];
+          if (s.geo_type) bits.push(s.geo_type);
+          if (typeof s.vertex_count === "number") bits.push(s.vertex_count + " vertices");
+          if (typeof s.approx_area_sqkm === "number") bits.push("~" + s.approx_area_sqkm + " km\u00b2");
+          if (typeof s.approx_length_km === "number") bits.push("~" + s.approx_length_km + " km");
+          setStatus(
+            "Saved (" + bits.join(", ") + "). Return to the chat and click \u201cLoad drawn geometry\u201d.",
+            "ok"
+          );
+        } else {
+          setStatus("Save failed: " + (data.error || resp.statusText), "err");
+          saveBtn.disabled = false;
+        }
+      } catch (err) {
+        setStatus("Save failed: " + err.message, "err");
+        saveBtn.disabled = false;
+      }
+    });
+
+    refreshSaveState();
+  </script>
+</body>
+</html>

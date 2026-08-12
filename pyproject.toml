@@ -1,0 +1,21 @@
+[project]
+name = "mcp-server-gis-helper"
+version = "0.1.0"
+description = "MCP server that lets a user draw GIS geometry on an interactive map and returns validated GeoJSON for use with other GIS MCP servers (FEMA NFHL, USGS National Map)."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastmcp[apps]>=3.4.7",
+    "prefab-ui>=0.15.0",
+    "python-dotenv>=1.0.0",
+    "starlette>=0.37.0",
+    "uvicorn>=0.30.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gis_helper_mcp"]
+artifacts = ["src/gis_helper_mcp/static/*.html"]
